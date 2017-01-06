@@ -1,4 +1,4 @@
-import {VNode, div, label, input, hr, h1, button, makeDOMDriver, p as Para, select, option} from '@cycle/dom';
+import {VNode, div, label, input, hr, h1, button, makeDOMDriver, p as Para, select, option, ul as UL, li as LI} from '@cycle/dom';
 import {DOMSource} from '@cycle/dom/xstream-typings'
 import xs, {Stream, MemoryStream} from 'xstream'
 
@@ -130,6 +130,89 @@ presenterListSel() {
 }
 
 /* ****** ****** */
+// list of items
+// - items can be added and removed dynamically
+
+interface ListCmdAdd {
+    type: "add";
+}
+interface ListCmdRemove {
+    type: "remove";
+}
+interface ListCmdDetail {
+    type: "select";
+    item: number;
+}
+type ListCmd = ListCmdAdd | ListCmdRemove | ListCmdDetail
+
+type PresenterList = {
+  list: (cmd$:Stream<ListCmd>) => Stream<{id: number, dom: Stream<VNode>}[]>
+}
+
+function viewList(dom: DOMSource, presenter: PresenterList): Stream<VNode> {
+  const addButtons = div('.addButtons', [
+    button('.add-btn', 'Add Item'),
+    button('.remove-btn', 'Remove Item')
+  ]);
+  // FIXME? how to construct a term of type ListCmdAdd?
+  let cmdAdd$ = <Stream<ListCmdAdd>>(dom.select('.add-btn').events('click').mapTo({type: 'add'}))
+  let cmdRemove$ = <Stream<ListCmdRemove>>(dom.select('.remove-btn').events('click').mapTo({type: 'remove'}))
+  let cmd$ = xs.merge(
+    cmdAdd$,
+    cmdRemove$
+  );
+
+  let items$ = presenter.list(cmd$)
+
+  return items$.map(items => {
+    const itemVNodeStreamsByKey = items.map(item =>
+      item.dom.map(vnode => {
+        vnode.key = item.id; return vnode;
+      })
+    );
+    return xs.combine(...itemVNodeStreamsByKey)
+      .map(vnodes => {
+        let LIs = vnodes.map(e =>
+          LI([e]));
+        return div('.list', [addButtons].concat(UL(LIs)))
+      });
+  }).flatten();
+}
+
+function
+presenterList (): PresenterList {
+  return {
+    list: (cmd$:Stream<ListCmd>): Stream<{id: number, dom: Stream<VNode>}[]> => {
+      let counter = 0 // mutable
+
+      let onCreate$ = cmd$.filter(a => a.type === 'add').map(cmd => {
+        return function(items: {id: number, dom: Stream<VNode>}[]): {id: number, dom: Stream<VNode>}[] {
+          let id = counter
+          counter = counter + 1
+
+          // TODO: move item rendering into a view function
+          let newItem = {id: id, dom: xs.of(Para(id.toString())).remember()}
+
+          items.push(newItem);
+          return items;
+        }
+      });
+
+      let onRemove$ = cmd$.filter(a => a.type === 'remove').map(cmd => {
+        return function(items: {id: number, dom: Stream<VNode>}[]) {
+          items.pop();
+          return items;
+        }
+      });
+
+      let init : {id: number, dom: Stream<VNode>}[] = []
+
+      return xs.merge(onCreate$, onRemove$).fold((listItems, mutator) => mutator(listItems), init);
+    }
+  }
+}
+
+/* ****** ****** */
 // main routine
 
 export function App (sources: Sources): Sinks {
@@ -137,10 +220,13 @@ export function App (sources: Sources): Sinks {
   let greeting = view(sources.DOM, presenter)
   let counter = viewCounter(sources.DOM, presenterCounter())
   let listSel = viewListSel(sources.DOM, presenterListSel())
+  let listItems = viewList(sources.DOM, presenterList())
 
   const sinks = {
     DOM:
-      xs.combine(greeting, counter, listSel).map(([greeting, counter, listSel]) => div ([greeting, hr(), counter, hr(), listSel]))
+      xs.combine(greeting, counter, listSel, listItems)
+        .map(([greeting, counter, listSel, listItems]) =>
+        div ([greeting, hr(), counter, hr(), listSel, hr(), listItems]))
   }
 
   return sinks
