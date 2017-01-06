@@ -1,4 +1,4 @@
-import {VNode, div, label, input, hr, h1, button, makeDOMDriver, p as Para} from '@cycle/dom';
+import {VNode, div, label, input, hr, h1, button, makeDOMDriver, p as Para, select, option} from '@cycle/dom';
 import {DOMSource} from '@cycle/dom/xstream-typings'
 import xs, {Stream, MemoryStream} from 'xstream'
 
@@ -85,16 +85,63 @@ presenterCounter() {
 }
 
 /* ****** ****** */
+// List selection
+
+type PresenterListSel = {
+  selectedValues: (selectedIndex: Stream<number>) => {choices: Stream<string[]>, selected: Stream<string>}
+}
+
+function viewListSel (dom: DOMSource, presenter: PresenterListSel): Stream<VNode> {
+  let action$ = xs.merge(
+    dom.select('.select')
+      .events('change')
+      .map(ev => {
+        let target = ev.target as HTMLSelectElement
+        return target.selectedIndex
+      })
+      .startWith(-1)
+  );
+  let {choices:choices$,selected:selected$} = presenter.selectedValues(action$);
+  let vtree$ =
+    xs.combine(choices$, selected$).map(([choices, selected]) =>
+        div([
+          h1('List selection example'),
+          select('.select', choices.map((v) => option(v))),
+          // FIXME: it seems that [combine] will pass [undefined] for events that didn't happen
+          // so we have to include some logic here
+          Para('You selected: ' + (selected === undefined? 'Nothing' : selected))
+        ])
+    )
+  return vtree$
+}
+
+function
+presenterListSel() {
+  // simple case: the list of choices is static, set only once
+  let init = ['Audi', 'Volkswagen', 'Ford', 'Skoda']
+  let init$ = xs.fromArray([init])
+  return {
+    selectedValues: (selected$: Stream<number>): {choices: Stream<string[]>, selected: Stream<string>} => {
+      let sel$ = selected$.map(selected => selected < -1 || selected > init.length? 'Nothing' : init[selected]);
+
+      return {choices: init$, selected: sel$};
+    }
+  }
+}
+
+/* ****** ****** */
 // main routine
 
 export function App (sources: Sources): Sinks {
 
   let greeting = view(sources.DOM, presenter)
   let counter = viewCounter(sources.DOM, presenterCounter())
+  let listSel = viewListSel(sources.DOM, presenterListSel())
 
   const sinks = {
     DOM:
-      xs.combine(greeting, counter).map(([greeting, counter]) => div ([greeting, hr(), counter]))
+      xs.combine(greeting, counter, listSel).map(([greeting, counter, listSel]) => div ([greeting, hr(), counter, hr(), listSel]))
   }
+
   return sinks
 }
