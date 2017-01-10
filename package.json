@@ -6,8 +6,10 @@
     "cycle-scripts-ts-webpack": "0.3.1"
   },
   "dependencies": {
+    "@cycle/collection": "^0.5.1",
     "@cycle/dom": "^14.3.0",
     "@cycle/xstream-run": "^4.2.0",
+    "cyc-cli": "0.0.39",
     "xstream": "^9.3.0"
   },
   "scripts": {

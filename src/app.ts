@@ -1,6 +1,7 @@
-import {VNode, div, label, input, hr, h1, button, makeDOMDriver, p as Para, select, option, ul as UL, li as LI} from '@cycle/dom';
+import {VNode, div, label, input, hr, h1, button, makeDOMDriver, p as Para, select, option, ul as UL, li as LI, span} from '@cycle/dom';
 import {DOMSource} from '@cycle/dom/xstream-typings'
 import xs, {Stream, MemoryStream} from 'xstream'
+import sampleCombine from 'xstream/extra/sampleCombine'
 
 export type Sources = {
   DOM: DOMSource
@@ -133,20 +134,10 @@ presenterListSel() {
 // list of items
 // - items can be added and removed dynamically
 
-interface ListCmdAdd {
-    type: "add";
-}
-interface ListCmdRemove {
-    type: "remove";
-}
-interface ListCmdDetail {
-    type: "select";
-    item: number;
-}
-type ListCmd = ListCmdAdd | ListCmdRemove | ListCmdDetail
+type ListCmd = {type: "add"} | {type: "remove"; item: number}
 
 type PresenterList = {
-  list: (cmd$:Stream<ListCmd>) => Stream<{id: number, dom: Stream<VNode>}[]>
+  list: (cmd$:Stream<ListCmd>, mkItem: (lab: string) => Stream<VNode>) => Stream<{id: number, dom: Stream<VNode>}[]>
 }
 
 function viewList(dom: DOMSource, presenter: PresenterList): Stream<VNode> {
@@ -154,15 +145,19 @@ function viewList(dom: DOMSource, presenter: PresenterList): Stream<VNode> {
     button('.add-btn', 'Add Item'),
     button('.remove-btn', 'Remove Item')
   ]);
-  // FIXME? how to construct a term of type ListCmdAdd?
-  let cmdAdd$ = <Stream<ListCmdAdd>>(dom.select('.add-btn').events('click').mapTo({type: 'add'}))
-  let cmdRemove$ = <Stream<ListCmdRemove>>(dom.select('.remove-btn').events('click').mapTo({type: 'remove'}))
-  let cmd$ = xs.merge(
-    cmdAdd$,
-    cmdRemove$
+  let cmd$ = <Stream<ListCmd>>xs.merge(
+    dom.select('.add-btn').events('click').mapTo({type: 'add'}),
+    dom.select('.list-item').events('click').map(e => ({
+      type: 'remove',
+      item: parseInt((e.target as HTMLElement).parentElement.dataset["index"])
+    }))
   );
 
-  let items$ = presenter.list(cmd$)
+  let items$ = presenter.list(cmd$,
+    // output something simple, for now
+    // TODO: events raised from items? e.g. details?
+    // - have to collect individual item events (these will signal IDs of items), at the list level
+    (lab) => xs.of(Para(lab)).remember())
 
   return items$.map(items => {
     const itemVNodeStreamsByKey = items.map(item =>
@@ -173,8 +168,8 @@ function viewList(dom: DOMSource, presenter: PresenterList): Stream<VNode> {
     return xs.combine(...itemVNodeStreamsByKey)
       .map(vnodes => {
         let LIs = vnodes.map(e =>
-          LI([e]));
-        return div('.list', [addButtons].concat(UL(LIs)))
+          div('.list-item', {attrs: {'data-index': e.key}}, [e]));
+        return div('.list', [addButtons].concat(LIs))
       });
   }).flatten();
 }
@@ -182,16 +177,17 @@ function viewList(dom: DOMSource, presenter: PresenterList): Stream<VNode> {
 function
 presenterList (): PresenterList {
   return {
-    list: (cmd$:Stream<ListCmd>): Stream<{id: number, dom: Stream<VNode>}[]> => {
+    list: (cmd$ :Stream<ListCmd>, mkItem: (lab: string) => Stream<VNode>): Stream<{id: number, dom: Stream<VNode>}[]> => {
       let counter = 0 // mutable
 
       let onCreate$ = cmd$.filter(a => a.type === 'add').map(cmd => {
         return function(items: {id: number, dom: Stream<VNode>}[]): {id: number, dom: Stream<VNode>}[] {
           let id = counter
-          counter = counter + 1
+          counter++;
 
-          // TODO: move item rendering into a view function
-          let newItem = {id: id, dom: xs.of(Para(id.toString())).remember()}
+          // what if we just want ids to be based directly on underlying array indexes?
+          // - why even bother with ids at view level???
+          let newItem = {id: id, dom: mkItem(id.toString())}
 
           items.push(newItem);
           return items;
@@ -200,7 +196,9 @@ presenterList (): PresenterList {
 
       let onRemove$ = cmd$.filter(a => a.type === 'remove').map(cmd => {
         return function(items: {id: number, dom: Stream<VNode>}[]) {
-          items.pop();
+          if (cmd.type !== 'remove') throw "wrong cmd type";
+          var idx = items.findIndex(p => p.id == cmd.item);
+          if (idx !== -1) items.splice(idx, 1);
           return items;
         }
       });
@@ -212,6 +210,200 @@ presenterList (): PresenterList {
   }
 }
 
+type CmdType = { type: 'ADD'; payload: string; amount: number } | { type: 'REMOVE'; index: number } | { type: 'CALCULATE' }
+type CmdTypeChipIn =  { type: 'TOGGLE'; index: number }
+type Contrib = { text: string; amount: number }
+type Payback = { from: string; to: string; amount: number; complete: boolean }
+type ChipIn = { total: number; equalPayment: number; values: Payback[] }
+
+function
+calcContribs(contributors: Contrib[]): ChipIn {
+  const totalValue = contributors.reduce((p,c) => p+c.amount, 0);
+  const equalPayment = totalValue/contributors.length;
+  const tmpArr = contributors.map((d) => ({text: d.text, amount: equalPayment - d.amount}));
+
+  const debtors = tmpArr.filter((e) => e.amount > 0);
+  const lenders = tmpArr.filter((e) => e.amount < 0);
+
+  var lender = lenders.length > 0? lenders[0] : null;
+  var debtor = debtors.length > 0? debtors[0] : null;
+  var values : Payback[] = [];
+
+  while (lenders.length > 0 && debtors.length > 0) {
+    lender = lender || lenders[0];
+    debtor = debtor || debtors[0];
+    let delta = debtor.amount + lender.amount;
+
+    if (delta < 0) {
+        values.push({
+          from: debtor.text,
+          to: lender.text,
+          amount: debtor.amount,
+          complete: false
+        });
+        lender.amount += debtor.amount;
+        debtor.amount = 0;
+    } else {
+        values.push({
+            from: debtor.text,
+            to: lender.text,
+            amount: -lender.amount,
+            complete: false
+        });
+        debtor.amount += lender.amount;
+        lender.amount = 0;
+    }
+
+    if (debtor.amount === 0) {
+        debtors.splice(0, 1);
+        debtor = null;
+    }
+    if (lender.amount === 0) {
+        lenders.splice(0, 1);
+        lender = null;
+    }
+
+    delta = 0;
+  }
+
+  return {
+      values: values,
+      total: totalValue,
+      equalPayment: equalPayment
+  };
+}
+
+function
+contribsPresenter(action$: Stream<CmdType>, chipIn$: Stream<CmdTypeChipIn>): {contribs: Stream<Contrib[]>, chipIns: Stream<ChipIn>} {
+  const addReducer$ = action$
+    .filter(action => action.type === 'ADD')
+    .map((action: { type: 'ADD'; payload: string; amount: number }) => (contribs: Contrib[]): Contrib[] => contribs.concat({
+      text: action.payload,
+      amount: action.amount
+    }));
+    
+  const removeReducer$ = action$
+    .filter(action => action.type === 'REMOVE')
+    .map((action: {type: 'REMOVE'; index: number}) => (contribs: Contrib[]): Contrib[] => contribs.filter((todo, i) => i !== action.index));
+
+  const calculateCmd$ = action$.filter(action => action.type === 'CALCULATE').debug('CALCULATING');
+
+  const reducer$ = xs.merge(addReducer$, removeReducer$);
+  const contribs$ = reducer$.fold((state, reducer) => reducer(state), [] as Contrib[]).debug('state');
+
+  const calculateReducer$ =
+    xs.combine(calculateCmd$, contribs$).map(([calculateCmd, contribs]) => (chipIn: ChipIn): ChipIn => calcContribs(contribs));
+  const toggleReducer$ = chipIn$
+    .map((action: {type: 'TOGGLE'; index: number}) => (chipIn: ChipIn): ChipIn => ({
+      ...chipIn,
+      values:
+        chipIn.values.map((payment, i) => {
+          console.log(payment, i, action.index);
+          if (i === action.index) {
+            return {
+              ...payment,
+              complete: !payment.complete
+            }
+          } else {
+            return payment
+          }
+      })
+    }));
+  const reducerChipIn$ = xs.merge(calculateReducer$, toggleReducer$);
+  const chipIns$ = reducerChipIn$.fold((state, reducer) => reducer(state), {
+      values: [],
+      total: 0,
+      equalPayment: 0
+  }).debug('state chip-ins');
+
+  return {
+    contribs: contribs$,
+    chipIns: chipIns$
+  }
+}
+
+function contribsView(sources: Sources, presenter: (e: Stream<CmdType>, u: Stream<CmdTypeChipIn>) => {contribs: Stream<Contrib[]>, chipIns: Stream<ChipIn>}): Sinks {
+  const name$ = sources.DOM
+    .select('.add-name')
+    .events('input')
+    .map(e => (e.target as HTMLInputElement).value);
+  const amount$ = sources.DOM.select('.add-amount')
+      .events('input')
+      .map(ev => parseFloat((ev.target as HTMLInputElement).value))
+      .startWith(0.0);
+  const addClicks$ = sources.DOM.select('.add')
+    .events('click')
+    .mapTo(true);
+  // we only want values of name/amount when button is clicked
+  const add$ = sampleCombine(name$,amount$)(addClicks$).map(([click, name, amount]) => ({
+    type: 'ADD',
+    payload: name,
+    amount: amount
+  }));
+  const calculate$ = sources.DOM.select('.calc')
+    .events('click')
+    .mapTo({type: 'CALCULATE'});
+
+  const toggle$ = sources.DOM
+    .select('.chipIn')
+    .events('click')
+    .debug(e => console.log('toggling: ' + (e.target as HTMLElement).dataset["index"]))
+    .map(e => {
+      return {
+        type: 'TOGGLE',
+        index: parseInt((e.target as HTMLElement).dataset["index"])
+      }
+    });
+    
+  const remove$ = sources.DOM
+    .select('.contrib>.remove')
+    .events('click')
+    .debug(e => console.log((e.target as HTMLElement).parentElement.dataset["index"]))
+    .map(e => ({
+      type: 'REMOVE',
+      index: parseInt((e.target as HTMLElement).parentElement.dataset["index"])
+    }));
+    
+  const intent$ = (xs.merge(add$, remove$, calculate$) as Stream<CmdType>);
+  const state$ = presenter(intent$, toggle$ as Stream<CmdTypeChipIn>);
+
+  return {
+    DOM: xs.combine(state$.contribs, state$.chipIns).map(([contribs, chipIns]) => div([
+      h1('Chip-in calculator'),
+
+      input('.add-name', {attrs: {placeholder: 'Name'}}),
+      input('.add-amount', {attrs: {type: 'number', placeholder: 'Amount'}}),
+      button('.add', 'Add'),
+
+      ...contribs.map((contrib, i) => div('.contrib', {
+        attrs: {'data-index': i}
+      }, [
+        span('.text', contrib.text),
+        ' ',
+        span('.amount', contrib.amount.toString()),
+        ' ',
+        button('.remove', 'Remove')
+      ])),
+
+      button('.calc', 'Calculate'),
+
+      // TODO: show results modally?
+
+      Para(['Total amount: ', span('.amount', chipIns.total)]),
+      Para(['Equal payment: ', span('.amount', chipIns.equalPayment)]),
+
+      ...(chipIns.values).map((chipIn, i) => div('.chipIn', {
+        attrs: {'data-index': i},
+        style: {'text-decoration': chipIn.complete? 'line-through': 'none'}
+      }, [
+        chipIn.from,
+        ' should give ', chipIn.amount.toString(),
+        ' to ', chipIn.to
+      ]))
+    ]))
+  };
+}
+
 /* ****** ****** */
 // main routine
 
@@ -221,12 +413,13 @@ export function App (sources: Sources): Sinks {
   let counter = viewCounter(sources.DOM, presenterCounter())
   let listSel = viewListSel(sources.DOM, presenterListSel())
   let listItems = viewList(sources.DOM, presenterList())
+  let contribs = contribsView(sources, contribsPresenter)
 
   const sinks = {
     DOM:
-      xs.combine(greeting, counter, listSel, listItems)
-        .map(([greeting, counter, listSel, listItems]) =>
-        div ([greeting, hr(), counter, hr(), listSel, hr(), listItems]))
+      xs.combine(greeting, counter, listSel, listItems, contribs.DOM)
+        .map(([greeting, counter, listSel, listItems, contribs]) =>
+        div ([greeting, hr(), counter, hr(), listSel, hr(), listItems, hr(), contribs]))
   }
 
   return sinks
