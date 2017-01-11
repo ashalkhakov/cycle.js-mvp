@@ -210,6 +210,9 @@ presenterList (): PresenterList {
   }
 }
 
+/* ****** ****** */
+// chip-in calculator
+
 type CmdType = { type: 'ADD'; payload: string; amount: number } | { type: 'REMOVE'; index: number } | { type: 'CALCULATE' }
 type CmdTypeChipIn =  { type: 'TOGGLE'; index: number }
 type Contrib = { text: string; amount: number }
@@ -405,21 +408,105 @@ function contribsView(sources: Sources, presenter: (e: Stream<CmdType>, u: Strea
 }
 
 /* ****** ****** */
+// elapsed timer
+
+type ElapsedTimerCmd = {type: 'START'} | {type: 'STOP'} | {type: 'RESET'}
+type PresenterState = {running: boolean; timer: number}
+
+function
+viewElapsedTimer (dom: DOMSource, presenter: (e: Stream<ElapsedTimerCmd>) => Stream<{running: boolean; mins: number, secs: number}>): Stream<VNode> {
+  const strm$ = dom.select('.timer-startstop')
+    .events('click')
+    .map((e) => {
+      let running = !!((e.target as HTMLElement).dataset["running"]); // convert to boolean; sheesh!
+      return {type: running? 'START' : 'STOP' };
+    });
+  const reset$ = dom.select('.timer-reset').events('click').mapTo({type: 'RESET'});
+  const cmd$ = xs.merge(strm$, reset$) as Stream<ElapsedTimerCmd>;
+
+  const vstate$ = presenter(cmd$)
+
+  let padToTwo = (n:number): string => n <= 9999 ? ("00"+n.toString()).slice(-2) : n.toString();
+
+  return vstate$.map((vs) => div('.elapsed-timer', [
+    h1('Elapsed timer'),
+    button('.timer-startstop', {attrs: {'data-running': vs.running.toString()}}, vs.running? 'Stop' : 'Start'),
+    button('.timer-reset', 'Reset'),
+    Para(`${padToTwo(vs.mins)}:${padToTwo(vs.secs)}`)
+  ]));
+}
+
+function timerInit (): PresenterState {
+  return { running: false, timer: 0 }
+}
+function
+timerSwitch(e: PresenterState): PresenterState {
+  return {
+    running: !e.running,
+    timer: e.timer
+  };
+}
+function
+timerReset (e: PresenterState): PresenterState {
+  return {
+    running: false,
+    timer: 0
+  };
+}
+function
+timerInc (e: PresenterState): PresenterState {
+  return {
+    running: e.running,
+    timer: e.running? e.timer+1 : e.timer
+  };
+}
+
+function
+presenterElapsedTimer (cmd$: Stream<ElapsedTimerCmd>): Stream<{running: boolean; secs: number; mins: number}> {
+  let running$ =
+    cmd$.map(t => (e: PresenterState): PresenterState => {
+      switch (t.type) {
+        case 'START': return timerSwitch(e);
+        case 'STOP': return timerSwitch(e);
+        case 'RESET': return timerReset(e);
+      }
+    });
+
+  let timer$ =
+    xs.periodic(1000).map(t => timerInc);
+
+  const init = timerInit ()
+  const state$ =
+    xs.merge(running$, timer$)
+      .fold((state, reducer) => reducer(state), init)
+      .startWith(init);
+
+  let secs$ = state$.map(state => {
+      let seconds = ~~(state.timer % 60);
+      let minutes = ~~(state.timer / 60);
+      return { running: state.running, mins: minutes, secs: seconds };
+    });
+
+  return secs$;
+}
+
+/* ****** ****** */
 // main routine
 
 export function App (sources: Sources): Sinks {
 
-  let greeting = view(sources.DOM, presenter)
-  let counter = viewCounter(sources.DOM, presenterCounter())
-  let listSel = viewListSel(sources.DOM, presenterListSel())
-  let listItems = viewList(sources.DOM, presenterList())
-  let contribs = contribsView(sources, contribsPresenter)
+  let greeting$ = view(sources.DOM, presenter)
+  let counter$ = viewCounter(sources.DOM, presenterCounter())
+  let listSel$ = viewListSel(sources.DOM, presenterListSel())
+  let listItems$ = viewList(sources.DOM, presenterList())
+  let contribs$ = contribsView(sources, contribsPresenter)
+  let timer$ = viewElapsedTimer(sources.DOM, presenterElapsedTimer)
 
   const sinks = {
     DOM:
-      xs.combine(greeting, counter, listSel, listItems, contribs.DOM)
-        .map(([greeting, counter, listSel, listItems, contribs]) =>
-        div ([greeting, hr(), counter, hr(), listSel, hr(), listItems, hr(), contribs]))
+      xs.combine(greeting$, counter$, listSel$, listItems$, contribs$.DOM, timer$)
+        .map(([greeting, counter, listSel, listItems, contribs, timer]) =>
+        div ([greeting, hr(), counter, hr(), listSel, hr(), listItems, hr(), contribs, hr(), timer]))
   }
 
   return sinks
