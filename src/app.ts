@@ -217,10 +217,17 @@ type CmdType = { type: 'ADD'; payload: string; amount: number } | { type: 'REMOV
 type CmdTypeChipIn =  { type: 'TOGGLE'; index: number }
 type Contrib = { text: string; amount: number }
 type Payback = { from: string; to: string; amount: number; complete: boolean }
-type ChipIn = { total: number; equalPayment: number; values: Payback[] }
+type ChipIn = { total: number; equalPayment: number }
 
 function
-calcContribs(contributors: Contrib[]): ChipIn {
+calcContribTotals(contributors: Contrib[]): ChipIn {
+  const totalValue = contributors.reduce((p,c) => p+c.amount, 0);
+  const equalPayment = contributors.length? totalValue/contributors.length : 0;
+  return { total: totalValue, equalPayment: equalPayment };
+}
+
+function
+calcContribs(contributors: Contrib[]): Payback[] {
   const totalValue = contributors.reduce((p,c) => p+c.amount, 0);
   const equalPayment = totalValue/contributors.length;
   const tmpArr = contributors.map((d) => ({text: d.text, amount: equalPayment - d.amount}));
@@ -269,15 +276,11 @@ calcContribs(contributors: Contrib[]): ChipIn {
     delta = 0;
   }
 
-  return {
-      values: values,
-      total: totalValue,
-      equalPayment: equalPayment
-  };
+  return values;
 }
 
 function
-contribsPresenter(action$: Stream<CmdType>, chipIn$: Stream<CmdTypeChipIn>): {contribs: Stream<Contrib[]>, chipIns: Stream<ChipIn>} {
+contribsPresenter(action$: Stream<CmdType>, chipIn$: Stream<CmdTypeChipIn>): {contribs: Stream<Contrib[]>, aggregates: Stream<ChipIn>, paybacks: Stream<Payback[]>} {
   const addReducer$ = action$
     .filter(action => action.type === 'ADD')
     .map((action: { type: 'ADD'; payload: string; amount: number }) => (contribs: Contrib[]): Contrib[] => contribs.concat({
@@ -294,13 +297,13 @@ contribsPresenter(action$: Stream<CmdType>, chipIn$: Stream<CmdTypeChipIn>): {co
   const reducer$ = xs.merge(addReducer$, removeReducer$);
   const contribs$ = reducer$.fold((state, reducer) => reducer(state), [] as Contrib[]).debug('state');
 
+  const aggregates$ = contribs$.map(st => calcContribTotals(st)).startWith({total: 0, equalPayment: 0});
+
   const calculateReducer$ =
-    xs.combine(calculateCmd$, contribs$).map(([calculateCmd, contribs]) => (chipIn: ChipIn): ChipIn => calcContribs(contribs));
+    xs.combine(calculateCmd$, contribs$).map(([calculateCmd, contribs]) => (chipIn: Payback[]): Payback[] => calcContribs(contribs));
   const toggleReducer$ = chipIn$
-    .map((action: {type: 'TOGGLE'; index: number}) => (chipIn: ChipIn): ChipIn => ({
-      ...chipIn,
-      values:
-        chipIn.values.map((payment, i) => {
+    .map((action: {type: 'TOGGLE'; index: number}) => (values: Payback[]): Payback[] => (
+      values.map((payment, i) => {
           console.log(payment, i, action.index);
           if (i === action.index) {
             return {
@@ -311,21 +314,22 @@ contribsPresenter(action$: Stream<CmdType>, chipIn$: Stream<CmdTypeChipIn>): {co
             return payment
           }
       })
-    }));
+    ));
   const reducerChipIn$ = xs.merge(calculateReducer$, toggleReducer$);
-  const chipIns$ = reducerChipIn$.fold((state, reducer) => reducer(state), {
-      values: [],
-      total: 0,
-      equalPayment: 0
-  }).debug('state chip-ins');
+  const paybacks$ = reducerChipIn$.fold((state, reducer) => reducer(state), []).debug('state chip-ins');
 
   return {
     contribs: contribs$,
-    chipIns: chipIns$
+    aggregates: aggregates$,
+    paybacks: paybacks$
   }
 }
 
-function contribsView(sources: Sources, presenter: (e: Stream<CmdType>, u: Stream<CmdTypeChipIn>) => {contribs: Stream<Contrib[]>, chipIns: Stream<ChipIn>}): Sinks {
+function
+contribsView(
+  sources: Sources,
+  presenter: (e: Stream<CmdType>, u: Stream<CmdTypeChipIn>) => {contribs: Stream<Contrib[]>, aggregates: Stream<ChipIn>, paybacks: Stream<Payback[]>}
+): Sinks {
   const name$ = sources.DOM
     .select('.add-name')
     .events('input')
@@ -371,7 +375,7 @@ function contribsView(sources: Sources, presenter: (e: Stream<CmdType>, u: Strea
   const state$ = presenter(intent$, toggle$ as Stream<CmdTypeChipIn>);
 
   return {
-    DOM: xs.combine(state$.contribs, state$.chipIns).map(([contribs, chipIns]) => div([
+    DOM: xs.combine(state$.contribs, state$.aggregates, state$.paybacks).map(([contribs, aggregates, paybacks]) => div([
       h1('Chip-in calculator'),
 
       input('.add-name', {attrs: {placeholder: 'Name'}}),
@@ -392,16 +396,16 @@ function contribsView(sources: Sources, presenter: (e: Stream<CmdType>, u: Strea
 
       // TODO: show results modally?
 
-      Para(['Total amount: ', span('.amount', chipIns.total)]),
-      Para(['Equal payment: ', span('.amount', chipIns.equalPayment)]),
+      Para(['Total amount: ', span('.amount', aggregates.total)]),
+      Para(['Equal payment: ', span('.amount', aggregates.equalPayment)]),
 
-      ...(chipIns.values).map((chipIn, i) => div('.chipIn', {
+      ...(paybacks).map((payback, i) => div('.chipIn', {
         attrs: {'data-index': i},
-        style: {'text-decoration': chipIn.complete? 'line-through': 'none'}
+        style: {'text-decoration': payback.complete? 'line-through': 'none'}
       }, [
-        chipIn.from,
-        ' should give ', chipIn.amount.toString(),
-        ' to ', chipIn.to
+        payback.from,
+        ' should give ', payback.amount.toString(),
+        ' to ', payback.to
       ]))
     ]))
   };
@@ -411,6 +415,34 @@ function contribsView(sources: Sources, presenter: (e: Stream<CmdType>, u: Strea
 // elapsed timer
 
 type ElapsedTimerCmd = {type: 'START'} | {type: 'STOP'} | {type: 'RESET'}
+
+class Timer {
+  readonly _running : boolean;
+  readonly _timer : number;
+  constructor(running: boolean, timer: number) {
+    this._running = running;
+    this._timer = timer;
+  }
+  public static init(): Timer {
+    return new Timer(false, 0);
+  }
+  public switch() {
+    return new Timer(!this._running, this._timer);
+  }
+  public reset() {
+    return Timer.init();
+  }
+  public inc() {
+    return new Timer(this._running, this._running? this._timer + 1 : this._timer);
+  }
+  get running(): boolean {
+    return this._running;
+  }
+  get timer(): number {
+    return this._timer;
+  }
+}
+
 type PresenterState = {running: boolean; timer: number}
 
 function
